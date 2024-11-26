@@ -1,0 +1,43 @@
+Example 1:
+```
+fn main() {
+    let mut s = String::from("hello"); // this is a mutable variable(s)
+    let ref1 = &s;    // create a mutable reference
+    let ref2 = &ref1; // create a mutable reference
+    let ref3 = &ref2; // create a mutable reference
+    s = String::from("goodbye"); // change the contents on mutable variable s
+    println!("{}", ref3.to_uppercase()); // it can't compile it
+}
+```
+answer: Becasue there is an immutable reference chain, the contents of the variable s cannot be modifiled.
+
+
+
+Example 2:
+```
+fn drip_drop() -> &String {
+    let s = String::from("hello world!");
+    return &s;
+}
+```
+
+ans: 
+The code won't compile because it creates a dangling reference. When the function drip_drop ends, 
+the memory associated with the local variable s is freed. Returning a reference to s leads to a dangling 
+reference since the reference points to invalid memory.
+To fix this code, we can remove the reference (&) from the return type, allowing the function to transfer ownership of the String to the caller. 
+This way, the String's data remains valid, as the ownership is properly passed out of the function.
+
+
+Example 3:
+```
+fn main() {
+    let s1 = String::from("hello");
+    let mut v = Vec::new();
+    v.push(s1); // transfer ownership of s1 to v
+    let s2: &String = v[0];
+    println!("{}", s2);
+}
+```
+ans: Becasue the ownership of s1 transfer to v, so if you want to use the index zero in variable v, you need to borrow or copy from v.
+Vec does not allow directly returning ownership of its elements via indexing because the indexing operation returns a reference to the element.
