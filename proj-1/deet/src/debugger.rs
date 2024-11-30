@@ -1,5 +1,8 @@
+use std::process::Child;
+
 use crate::debugger_command::DebuggerCommand;
-use crate::inferior::{Inferior, Status};
+use crate::inferior::{self, Inferior, Status};
+use nix::sys::signal::Signal;
 use nix::sys::wait::{WaitPidFlag, WaitStatus};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -29,42 +32,72 @@ impl Debugger {
         }
     }
 
+    fn print_status(&mut self) {
+        let inferior_mut = self.inferior.as_mut().unwrap();
+        match inferior_mut.cont() {
+            Ok(status) => {
+                match status {
+                    Status::Stopped(signal, _) => {
+                        println!("Child stopped (signal {})", signal);
+
+                    },
+                    Status::Exited(signal_code) => {
+                        println!("Child exited (status {})", signal_code);
+                    },
+                    Status::Signaled(signal) => {
+                        println!("Child exited exited due to signal {}", signal);
+                    },
+                }
+
+            },
+            Err(e) => {
+                eprintln!("{}", e);
+            },
+        }
+    }
+
+    fn kill(&mut self) {
+        let inferior_mut = self.inferior.as_mut().unwrap();
+        let pid = inferior_mut.pid();
+        match inferior_mut.kill() {
+            Ok(_) => {
+                println!("Killing running inferior (pid {})", &pid);
+            },
+            Err(_) => {
+                eprintln!("Error: failed to kill running inferior (pid {})", &pid);
+            },
+        }
+    }
+
     pub fn run(&mut self) {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
+                    // check if any existing inferiors before run new one
+                    if self.inferior.is_some() {
+                        self.kill();
+                    }
                     if let Some(inferior) = Inferior::new(&self.target, &args) {
                         // Create the inferior
                         self.inferior = Some(inferior);
-                        // TODO (milestone 1): make the inferior run
-                        // You may use self.inferior.as_mut().unwrap() to get a mutable reference
-                        // to the Inferior object
-                        let inferior_mut = self.inferior.as_mut().unwrap();
-                        match inferior_mut.continue_execution() {
-                            Ok(status) => {
-                                match status {
-                                    Status::Stopped(signal, _) => {
-                                        println!("Child Stopped by signal {}", signal);
-                                    },
-                                    Status::Exited(signal_code) => {
-                                        println!("Child exited (status {})", signal_code);
-                                    },
-                                    Status::Signaled(signal) => {
-                                        println!("Child exited exited due to signal {}", signal);
-                                    },
-                                }
-
-                            },
-                            Err(e) => {
-                                eprintln!("{}", e);
-                            },
-                        }
+                        self.print_status();
                        
                     } else {
                         println!("Error starting subprocess");
                     }
+                },
+                DebuggerCommand::Continue => {
+                    // check if there have inferior to debug
+                    if self.inferior.is_none() {
+                        println!("Nothing is being debugged!");
+                        continue;
+                    }
+                    self.print_status();
                 }
                 DebuggerCommand::Quit => {
+                    if self.inferior.is_some() {
+                        self.kill();
+                    }
                     return;
                 }
             }

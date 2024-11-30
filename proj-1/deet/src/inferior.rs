@@ -3,6 +3,7 @@ use nix::sys::signal;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
@@ -73,10 +74,19 @@ impl Inferior {
         nix::unistd::Pid::from_raw(self.child.id() as i32)
     }
 
-    pub fn continue_execution(&self) -> Result<Status, nix::Error> {
+    // wake up the inferior and run it until it stops or terminates
+    pub fn cont(&self) -> Result<Status, nix::Error> {
         // contiune execute child process
         ptrace::cont(self.pid(), None)?;
         // wait the statue of child process
+        self.wait(None)
+    }
+
+
+    pub fn kill(&mut self) -> Result<Status, nix::Error> {
+        let _ = Child::kill(&mut self.child);
+        
+        // Note: wait the statue of child process, make sure the child process quit successful
         self.wait(None)
     }
 
