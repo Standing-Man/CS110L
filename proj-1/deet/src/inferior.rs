@@ -1,8 +1,11 @@
 use nix::sys::ptrace;
 use nix::sys::signal;
+use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use std::os::unix::process::CommandExt;
 use std::process::Child;
+use std::process::Command;
 
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
@@ -34,17 +37,47 @@ impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
     pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
-        // TODO: implement me!
-        println!(
-            "Inferior::new not implemented! target={}, args={:?}",
-            target, args
-        );
+        let mut binding = Command::new(target);
+        let process = binding.args(args);
+        unsafe {
+            process.pre_exec(|| {
+                child_traceme()
+            });
+        }
+        let child_process = process.spawn().ok()?;
+        let inferior = Inferior{child: child_process};
+        match inferior.wait(None) {
+            Ok(status) => {
+                match status {
+                    Status::Stopped(signal, _) => {
+                        if signal == Signal::SIGTRAP {
+                            return Some(inferior);
+                        }
+                    },
+                    _ => {
+                        eprintln!("Other status happened!");
+                        return None;
+                    },
+                }
+            },
+            Err(e) => {
+                eprintln!("check failed: {}", e);
+                return None;
+            },
+        }
         None
     }
 
     /// Returns the pid of this inferior.
     pub fn pid(&self) -> Pid {
         nix::unistd::Pid::from_raw(self.child.id() as i32)
+    }
+
+    pub fn continue_execution(&self) -> Result<Status, nix::Error> {
+        // contiune execute child process
+        ptrace::cont(self.pid(), None)?;
+        // wait the statue of child process
+        self.wait(None)
     }
 
     /// Calls waitpid on this inferior and returns a Status to indicate the state of the process
