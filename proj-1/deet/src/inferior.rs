@@ -31,6 +31,10 @@ fn child_traceme() -> Result<(), std::io::Error> {
     )))
 }
 
+fn align_addr_to_word(addr: usize) -> usize {
+    addr & (-(size_of::<usize>() as isize) as usize)
+}
+
 
 pub struct Inferior {
     child: Child,
@@ -39,7 +43,7 @@ pub struct Inferior {
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
+    pub fn new(target: &str, args: &Vec<String>, breakpoints: &Vec<usize>) -> Option<Inferior> {
         let mut binding = Command::new(target);
         let process = binding.args(args);
         unsafe {
@@ -48,12 +52,14 @@ impl Inferior {
             });
         }
         let child_process = process.spawn().ok()?;
-        let inferior = Inferior{child: child_process};
+        let mut inferior = Inferior{child: child_process};
         match inferior.wait(None) {
             Ok(status) => {
                 match status {
                     Status::Stopped(signal, _) => {
                         if signal == Signal::SIGTRAP {
+                            // install these breakpoint into process
+                            inferior.install(breakpoints);
                             return Some(inferior);
                         }
                     },
@@ -69,6 +75,31 @@ impl Inferior {
             },
         }
         None
+    }
+
+    // install these breakpoint into process
+    fn install(&mut self, breakpoints: &Vec<usize>) {
+        let interrupt_instruction: u8 = 0xcc;
+        for addr in breakpoints {
+            let _ = self.write_byte(addr.clone(), interrupt_instruction);
+        }
+    }
+
+    fn write_byte(&mut self, addr: usize, val: u8) -> Result<u8, nix::Error> {
+        let aligned_addr = align_addr_to_word(addr);
+        let byte_offset = addr - aligned_addr;
+        let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
+        let orig_byte = (word >> 8 * byte_offset) & 0xff;
+        let masked_word = word & !(0xff << 8 * byte_offset);
+        let updated_word = masked_word | ((val as u64) << 8 * byte_offset);
+        unsafe {
+            ptrace::write(
+                self.pid(),
+                aligned_addr as ptrace::AddressType,
+                updated_word as *mut std::ffi::c_void,
+            )?;
+        }
+        Ok(orig_byte as u8)
     }
 
     /// Returns the pid of this inferior.

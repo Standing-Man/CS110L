@@ -1,23 +1,38 @@
-use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use crate::debugger_command::DebuggerCommand;
-use crate::inferior::{self, Inferior, Status};
-use nix::sys::signal::Signal;
-use nix::sys::wait::{WaitPidFlag, WaitStatus};
+use crate::dwarf_data::{DwarfData, Error as DwarfError};
+use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
+use rustyline::history::FileHistory;
+
 
 pub struct Debugger {
     target: String,
     history_path: String,
-    readline: Editor<()>,
+    readline: Editor<(), FileHistory>,
     inferior: Option<Inferior>,
+    breakpoints: Vec<usize>,
     debug_data: DwarfData,
+}
+
+fn parse_address(address: &str) -> Option<usize> {
+    let mut addr = "";
+    if address.to_lowercase().starts_with("0x") {
+        // b 0x123456
+        addr = &address[2..];
+    } else if address.to_lowercase().starts_with("*0x") {
+         // b *0x123456
+         addr = &address[3..];
+    } else {
+        // b main:12  function:line_number
+    }
+    usize::from_str_radix(&addr, 16).ok()
 }
 
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
-        // TODO (milestone 3): initialize the DwarfData
+        // (milestone 3): initialize the DwarfData
         let debug_data = match DwarfData::from_file(target) {
             Ok(val) => val,
             Err(DwarfError::ErrorOpeningFile) => {
@@ -30,8 +45,10 @@ impl Debugger {
             }
         };
 
+        debug_data.print();
+
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
-        let mut readline = Editor::<()>::new();
+        let mut readline = Editor::<(), FileHistory>::new().expect("Create Editor fail");
         // Attempt to load history from ~/.deet_history if it exists
         let _ = readline.load_history(&history_path);
 
@@ -41,6 +58,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
+            breakpoints: vec![],
         }
     }
 
@@ -90,7 +108,7 @@ impl Debugger {
                     if self.inferior.is_some() {
                         self.kill();
                     }
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
                         // Create the inferior
                         self.inferior = Some(inferior);
                         self.print_status();
@@ -110,7 +128,12 @@ impl Debugger {
                 DebuggerCommand::Backtrace => {
                     let inferior = self.inferior.as_ref().unwrap();
                     inferior.print_backtrace(&self.debug_data).unwrap();
-                }
+                },
+                DebuggerCommand::Break(address) => {
+                    let addr = parse_address(&address).unwrap();
+                    println!("Set breakpoint 0 at {:x}", &addr);
+                    self.breakpoints.push(addr);
+                },
                 DebuggerCommand::Quit => {
                     if self.inferior.is_some() {
                         self.kill();
