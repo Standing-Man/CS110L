@@ -49,9 +49,9 @@ impl Debugger {
         match inferior_mut.cont() {
             Ok(status) => {
                 match status {
-                    Status::Stopped(signal, _) => {
+                    Status::Stopped(signal, stop_address) => {
                         println!("Child stopped (signal {})", signal);
-
+                        println!("Stopped at {}",self.debug_data.get_line_from_addr(stop_address).unwrap())
                     },
                     Status::Exited(signal_code) => {
                         println!("Child exited (status {})", signal_code);
