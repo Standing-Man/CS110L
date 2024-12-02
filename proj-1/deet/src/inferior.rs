@@ -1,12 +1,13 @@
+use addr2line::gimli::DebugInfo;
 use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
+use crate::dwarf_data::DwarfData;
 
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
@@ -29,6 +30,7 @@ fn child_traceme() -> Result<(), std::io::Error> {
         "ptrace TRACEME failed",
     )))
 }
+
 
 pub struct Inferior {
     child: Child,
@@ -80,6 +82,23 @@ impl Inferior {
         ptrace::cont(self.pid(), None)?;
         // wait the statue of child process
         self.wait(None)
+    }
+
+    pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
+        let regs = ptrace::getregs(self.pid()).unwrap();
+        let mut instruction_ptr = regs.rip as usize;
+        let mut base_ptr = regs.rbp as usize;
+        loop {
+            let func_name = debug_data.get_function_from_addr(instruction_ptr).unwrap();
+            let line = debug_data.get_line_from_addr(instruction_ptr).unwrap();
+            println!("{func_name} ({line})");
+            if func_name == "main" {
+                break;
+            }
+            instruction_ptr = ptrace::read(self.pid(), (base_ptr + 8) as ptrace::AddressType)? as usize;
+            base_ptr = ptrace::read(self.pid(), base_ptr as ptrace::AddressType)? as usize;
+        }
+        Ok(())
     }
 
 

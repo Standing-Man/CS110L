@@ -1,5 +1,4 @@
-use std::process::Child;
-
+use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use crate::debugger_command::DebuggerCommand;
 use crate::inferior::{self, Inferior, Status};
 use nix::sys::signal::Signal;
@@ -12,12 +11,24 @@ pub struct Debugger {
     history_path: String,
     readline: Editor<()>,
     inferior: Option<Inferior>,
+    debug_data: DwarfData,
 }
 
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
         // TODO (milestone 3): initialize the DwarfData
+        let debug_data = match DwarfData::from_file(target) {
+            Ok(val) => val,
+            Err(DwarfError::ErrorOpeningFile) => {
+                println!("Could not open file {}", target);
+                std::process::exit(1);
+            }
+            Err(DwarfError::DwarfFormatError(err)) => {
+                println!("Could not load debugging symbols from {}: {:?}", target, err);
+                std::process::exit(1);
+            }
+        };
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
@@ -29,6 +40,7 @@ impl Debugger {
             history_path,
             readline,
             inferior: None,
+            debug_data,
         }
     }
 
@@ -43,6 +55,7 @@ impl Debugger {
                     },
                     Status::Exited(signal_code) => {
                         println!("Child exited (status {})", signal_code);
+                        self.inferior = None;
                     },
                     Status::Signaled(signal) => {
                         println!("Child exited exited due to signal {}", signal);
@@ -93,6 +106,10 @@ impl Debugger {
                         continue;
                     }
                     self.print_status();
+                },
+                DebuggerCommand::Backtrace => {
+                    let inferior = self.inferior.as_ref().unwrap();
+                    inferior.print_backtrace(&self.debug_data).unwrap();
                 }
                 DebuggerCommand::Quit => {
                     if self.inferior.is_some() {
@@ -103,6 +120,7 @@ impl Debugger {
             }
         }
     }
+
 
     /// This function prompts the user to enter a command, and continues re-prompting until the user
     /// enters a valid command. It uses DebuggerCommand::from_tokens to do the command parsing.

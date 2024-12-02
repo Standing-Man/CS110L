@@ -1,5 +1,6 @@
 use crate::gimli_wrapper;
 use addr2line::Context;
+use nix::sys::ptrace::AddressType;
 use object::Object;
 use std::convert::TryInto;
 use std::{fmt, fs};
