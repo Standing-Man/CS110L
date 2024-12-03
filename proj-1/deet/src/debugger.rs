@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::debugger_command::DebuggerCommand;
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use crate::inferior::{Inferior, Status};
@@ -6,12 +7,25 @@ use rustyline::Editor;
 use rustyline::history::FileHistory;
 
 
+#[derive(Clone)]
+pub struct Breakpoint {
+    pub addr: usize,
+    pub orig_byte: u8,
+}
+
+
+// impl Breakpoint {
+//     pub fn new(addr: usize, orig_byte: u8) -> Breakpoint {
+//         Breakpoint{addr, orig_byte}
+//     }
+// }
+
 pub struct Debugger {
     target: String,
     history_path: String,
     readline: Editor<(), FileHistory>,
     inferior: Option<Inferior>,
-    breakpoints: Vec<usize>,
+    breakpoints: HashMap<usize, Option<Breakpoint>>,
     debug_data: DwarfData,
 }
 
@@ -52,19 +66,21 @@ impl Debugger {
         // Attempt to load history from ~/.deet_history if it exists
         let _ = readline.load_history(&history_path);
 
+        let breakpoints = HashMap::new();
+
         Debugger {
             target: target.to_string(),
             history_path,
             readline,
             inferior: None,
             debug_data,
-            breakpoints: vec![],
+            breakpoints,
         }
     }
 
     fn print_status(&mut self) {
         let inferior_mut = self.inferior.as_mut().unwrap();
-        match inferior_mut.cont() {
+        match inferior_mut.cont(&self.breakpoints) {
             Ok(status) => {
                 match status {
                     Status::Stopped(signal, stop_address) => {
@@ -77,6 +93,7 @@ impl Debugger {
                     },
                     Status::Signaled(signal) => {
                         println!("Child exited exited due to signal {}", signal);
+                        self.inferior = None;
                     },
                 }
 
@@ -108,7 +125,7 @@ impl Debugger {
                     if self.inferior.is_some() {
                         self.kill();
                     }
-                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args, &mut self.breakpoints) {
                         // Create the inferior
                         self.inferior = Some(inferior);
                         self.print_status();
@@ -131,8 +148,20 @@ impl Debugger {
                 },
                 DebuggerCommand::Break(address) => {
                     let addr = parse_address(&address).unwrap();
-                    println!("Set breakpoint 0 at {:x}", &addr);
-                    self.breakpoints.push(addr);
+                    println!("Set breakpoint {} at {:x}", self.breakpoints.len(), &addr);
+                    if let Some(inferior) = &mut self.inferior {
+                        match inferior.write_byte(addr, 0xcc) {
+                            Ok(orig_byte) => {
+                                self.breakpoints
+                                    .insert(addr, Some(Breakpoint { addr, orig_byte }));
+                            }
+                            Err(err) => {
+                                println!("Debugger::new breakpoint write_byte: {}", err)
+                            }
+                        }
+                    } else {
+                        self.breakpoints.insert(addr, None);
+                    }
                 },
                 DebuggerCommand::Quit => {
                     if self.inferior.is_some() {
@@ -168,7 +197,7 @@ impl Debugger {
                     if line.trim().len() == 0 {
                         continue;
                     }
-                    self.readline.add_history_entry(line.as_str());
+                    let _ = self.readline.add_history_entry(line.as_str());
                     if let Err(err) = self.readline.save_history(&self.history_path) {
                         println!(
                             "Warning: failed to save history file at {}: {}",

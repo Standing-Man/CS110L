@@ -1,12 +1,14 @@
-use addr2line::gimli::DebugInfo;
 use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use std::collections::HashMap;
+use std::convert::TryInto;
 use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
+use crate::debugger::Breakpoint;
 use crate::dwarf_data::DwarfData;
 
 pub enum Status {
@@ -43,7 +45,7 @@ pub struct Inferior {
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>, breakpoints: &Vec<usize>) -> Option<Inferior> {
+    pub fn new(target: &str, args: &Vec<String>, breakpoints: &mut HashMap<usize, Option<Breakpoint>>) -> Option<Inferior> {
         let mut binding = Command::new(target);
         let process = binding.args(args);
         unsafe {
@@ -78,14 +80,16 @@ impl Inferior {
     }
 
     // install these breakpoint into process
-    fn install(&mut self, breakpoints: &Vec<usize>) {
+    fn install(&mut self, breakpoints: &mut HashMap<usize, Option<Breakpoint>>) {
         let interrupt_instruction: u8 = 0xcc;
-        for addr in breakpoints {
-            let _ = self.write_byte(addr.clone(), interrupt_instruction);
+        for (addr, _) in breakpoints.clone() {
+            let orig_byte = self.write_byte(addr.clone(), interrupt_instruction).unwrap();
+            
+            breakpoints.insert(addr, Some(Breakpoint{addr, orig_byte}));
         }
     }
 
-    fn write_byte(&mut self, addr: usize, val: u8) -> Result<u8, nix::Error> {
+    pub fn write_byte(&mut self, addr: usize, val: u8) -> Result<u8, nix::Error> {
         let aligned_addr = align_addr_to_word(addr);
         let byte_offset = addr - aligned_addr;
         let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
@@ -108,11 +112,36 @@ impl Inferior {
     }
 
     // wake up the inferior and run it until it stops or terminates
-    pub fn cont(&self) -> Result<Status, nix::Error> {
+    pub fn cont(&mut self, breakpoints: &HashMap<usize, Option<Breakpoint>>) -> Result<Status, nix::Error> {
+        let mut regs = ptrace::getregs(self.pid()).unwrap();
+        let rip: usize = regs.rip.try_into().unwrap(); 
+        if breakpoints.contains_key(&(rip-1)) {
+            // restore the first byte of the instruction we replaced
+            let orig_byte = breakpoints[&(rip-1)].clone().unwrap().orig_byte;
+            self.write_byte(rip-1, orig_byte).unwrap();
+            // set %rip = %rip - 1 to rewind the instruction pointer
+            regs.rip = (rip - 1) as u64;
+            ptrace::setregs(self.pid(), regs)?;
+            // ptrace::step to go to next instruction
+            ptrace::step(self.pid(), None)?;
+            match self.wait(None).unwrap() {
+                Status::Stopped(_, _) => {
+                    // restore 0xcc in the breakpoint location
+                    println!("rip before: {}", ptrace::getregs(self.pid())?.rip);
+                    self.write_byte(rip-1, 0xcc)?;
+                    println!("rip after: {}", ptrace::getregs(self.pid())?.rip);
+                },
+                Status::Exited(exit_code) => return Ok(Status::Exited(exit_code)),
+                Status::Signaled(signal) => return Ok(Status::Signaled(signal)),
+            }
+    
+        }
         // contiune execute child process
         ptrace::cont(self.pid(), None)?;
         // wait the statue of child process
         self.wait(None)
+
+
     }
 
     pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
