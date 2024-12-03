@@ -29,20 +29,6 @@ pub struct Debugger {
     debug_data: DwarfData,
 }
 
-fn parse_address(address: &str) -> Option<usize> {
-    let mut addr = "";
-    if address.to_lowercase().starts_with("0x") {
-        // b 0x123456
-        addr = &address[2..];
-    } else if address.to_lowercase().starts_with("*0x") {
-         // b *0x123456
-         addr = &address[3..];
-    } else {
-        // b main:12  function:line_number
-    }
-    usize::from_str_radix(&addr, 16).ok()
-}
-
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
@@ -76,6 +62,25 @@ impl Debugger {
             debug_data,
             breakpoints,
         }
+    }
+
+    fn parse_address(&self, address: &str) -> Option<usize> {
+        let mut addr = "";
+        if address.to_lowercase().starts_with("0x") {
+            // b 0x123456
+            addr = &address[2..];
+        } else if address.to_lowercase().starts_with("*0x") {
+             // b *0x123456
+             addr = &address[3..];
+        } else if address.parse::<usize>().is_ok() {
+            // b line_number
+            let line_number = address.parse::<usize>().unwrap();
+            return self.debug_data.get_addr_for_line(None, line_number);
+        } else {
+            // b function_name
+            return self.debug_data.get_addr_for_function(None, &address);
+        }
+        usize::from_str_radix(&addr, 16).ok()
     }
 
     fn print_status(&mut self) {
@@ -147,8 +152,9 @@ impl Debugger {
                     inferior.print_backtrace(&self.debug_data).unwrap();
                 },
                 DebuggerCommand::Break(address) => {
-                    let addr = parse_address(&address).unwrap();
+                    let addr = self.parse_address(&address).unwrap();
                     println!("Set breakpoint {} at {:x}", self.breakpoints.len(), &addr);
+
                     if let Some(inferior) = &mut self.inferior {
                         match inferior.write_byte(addr, 0xcc) {
                             Ok(orig_byte) => {

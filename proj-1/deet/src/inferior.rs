@@ -127,9 +127,7 @@ impl Inferior {
             match self.wait(None).unwrap() {
                 Status::Stopped(_, _) => {
                     // restore 0xcc in the breakpoint location
-                    println!("rip before: {}", ptrace::getregs(self.pid())?.rip);
                     self.write_byte(rip-1, 0xcc)?;
-                    println!("rip after: {}", ptrace::getregs(self.pid())?.rip);
                 },
                 Status::Exited(exit_code) => return Ok(Status::Exited(exit_code)),
                 Status::Signaled(signal) => return Ok(Status::Signaled(signal)),
