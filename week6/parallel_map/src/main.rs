@@ -1,15 +1,16 @@
 use crossbeam_channel;
-use core::num;
 use std::{thread, time};
 
 fn parallel_map<T, U, F>(mut input_vec: Vec<T>, num_threads: usize, f: F) -> Vec<U>
 where
     F: FnOnce(T) -> U + Send + Copy + 'static,
     T: Send + 'static,
-    U: Send + 'static + Default,
+    U: Send + 'static + Default + std::fmt::Debug,
 {
     let mut output_vec: Vec<U> = Vec::with_capacity(input_vec.len());
-    // TODO: implement parallel map!
+    for _ in 0..input_vec.len() {
+        output_vec.push(U::default());
+    }
     let (input_tx, input_rx) = crossbeam_channel::unbounded();
     let (output_tx, output_rx) = crossbeam_channel::unbounded();
     let mut threads = Vec::new();
@@ -18,20 +19,18 @@ where
         let input_rx = input_rx.clone();
         let output_tx = output_tx.clone();
         threads.push(thread::spawn(move|| {
-            while let Ok(num) = input_rx.recv() {
+            while let Ok((index, num)) = input_rx.recv() {
                 output_tx
-                    .send(f(num))
+                    .send((index, f(num)))
                     .expect("Tried to write to the result into the channel");   
             }
         }));
     }
 
-    for num in input_vec {
-        // let input_tx = input_tx.clone();
-        input_tx
-        .send(num)
-        .expect("Tried to write num from input into the channel");
+    for (index, num) in input_vec.into_iter().enumerate() {
+        input_tx.send((index, num)).expect("Tried to write num from input into the channel");
     }
+
     drop(input_tx);
     for thread in threads {
         thread.join().expect("Panic occurred in thread");
@@ -39,7 +38,7 @@ where
 
     drop(output_tx);
     while let Ok(result) = output_rx.recv() {
-        output_vec.push(result);
+        output_vec[result.0] = result.1;
     }
 
     output_vec
