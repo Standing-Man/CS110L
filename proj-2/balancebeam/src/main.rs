@@ -88,13 +88,27 @@ fn main() {
 
 fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
     let mut rng = rand::rngs::StdRng::from_entropy();
-    let upstream_idx = rng.gen_range(0..state.upstream_addresses.len());
-    let upstream_ip = &state.upstream_addresses[upstream_idx];
-    TcpStream::connect(upstream_ip).or_else(|err| {
-        log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
-        Err(err)
-    })
-    // TODO: implement failover (milestone 3)
+    let len = state.upstream_addresses.len();
+    let mut upstream_idx = rng.gen_range(0..len);
+    let record_idx = upstream_idx;
+    let mut error = None;
+    loop {
+        let upstream_ip = &state.upstream_addresses[upstream_idx];
+        match TcpStream::connect(upstream_ip) {
+            Ok(tcp_stream) => {
+                log::info!("Successfully connect to upstream {}", upstream_ip);
+                return Ok(tcp_stream);
+            },
+            Err(err) => {
+                error = Some(err);
+            },
+        }
+        upstream_idx = (upstream_idx + 1) % len;
+        if upstream_idx == record_idx {
+            break;
+        }
+    }
+    return Err(error.unwrap());
 }
 
 fn send_response(client_conn: &mut TcpStream, response: &http::Response<Vec<u8>>) {
