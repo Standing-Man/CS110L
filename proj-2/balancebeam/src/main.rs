@@ -227,24 +227,16 @@ fn handle_connection(mut client_conn: TcpStream, state: &ProxyState) {
                     request
                 } else {
                     let mut table = state.rate_limiting_table.lock().unwrap();
-                    if table.contains_key(&client_ip) {
-                        // the client ip request
-                        let times = table.get(&client_ip).unwrap();
-                        if times >= &state.max_requests_per_minute {
-                            let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
-                            send_response(&mut client_conn, &response);
-                            drop(table);
-                            continue;
-                        } else {
-                            let rates = table.get_mut(&client_ip).unwrap();
-                            *rates += 1;
-                            drop(table);
-                            request
-                        }
+                    let entry = table.entry(client_ip.clone()).or_insert(0);
+                
+                    if *entry >= state.max_requests_per_minute {
+                        let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
+                        send_response(&mut client_conn, &response);
+                        drop(table); 
+                        continue;
                     } else {
-                        // the client ip never request 
-                        table.insert(client_ip.clone(), 1);
-                        drop(table);
+                        *entry += 1;
+                        drop(table); 
                         request
                     }
                 }
