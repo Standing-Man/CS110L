@@ -3,7 +3,7 @@ mod response;
 
 use clap::Parser;
 use rand::{Rng, SeedableRng};
-use std::{net::{TcpListener, TcpStream}, sync::Mutex, thread, time::Duration};
+use std::{net::{TcpListener, TcpStream}, sync::{Arc, Mutex}, thread, time::Duration};
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -33,10 +33,8 @@ struct CmdOptions {
 /// You should add fields to this struct in later milestones.
 struct ProxyState {
     /// How frequently we check whether upstream servers are alive (Milestone 4)
-    #[allow(dead_code)]
     active_health_check_interval: usize,
     /// Where we should send requests when doing active health checks (Milestone 4)
-    #[allow(dead_code)]
     active_health_check_path: String,
     /// Maximum number of requests an individual IP can make in a minute (Milestone 5)
     #[allow(dead_code)]
@@ -44,7 +42,7 @@ struct ProxyState {
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
     /// Addresses of active servers taht we are proxying to
-    active_addresses: Mutex<Vec<String>>,
+    active_addresses: Arc<Mutex<Vec<String>>>,
 }
 
 fn main() {
@@ -76,11 +74,62 @@ fn main() {
     // Handle incoming connections
     let state = ProxyState {
         upstream_addresses: options.upstream,
-        active_addresses: Mutex::new(Vec::new()),
+        active_addresses: Arc::new(Mutex::new(Vec::new())),
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
     };
+    let addersses = state.upstream_addresses.clone();
+    let active_health_check_path = state.active_health_check_path.clone();
+    let shared_active_addresses = Arc::clone(&state.active_addresses);
+    thread::spawn(move || {
+        loop {
+            log::info!("Active health check interval begin");
+            let mut active_upstream = shared_active_addresses.lock().unwrap();
+            // clear the active server
+            active_upstream.clear();
+            for upstream in &addersses {
+                // connect upstream server
+                match TcpStream::connect(upstream) {
+                    Ok(mut tcp_stream) => {
+                        // log::info!("Active_health_checks: Successfully connect to upstream {}", &upstream);
+                        let path = format!("https://{}{}", upstream, active_health_check_path);
+                        let request = http::Request::builder()
+                            .method(http::Method::GET)
+                            .uri(path)
+                            .header("Host", upstream.clone())
+                            .body(Vec::new())
+                            .unwrap();
+                        if let Err(_) = request::write_to_stream(&request, &mut tcp_stream) {
+                            // fail to write the request into tcp_stream
+                            log::info!("Active_health_checks: Failed to write the request into tcp_stream {:?}", tcp_stream);
+                            continue;
+                        }
+
+                        let response = match response::read_from_stream(&mut tcp_stream, request.method()) {
+                            Ok(response) => response,
+                            Err(error) => {
+                                log::error!("Error reading response from server: {:?}", error);
+                                continue;
+                            }
+                        };
+                        if response.status().as_u16() == 200 {
+                            active_upstream.push(upstream.clone());
+                        }
+                    },
+                    Err(_) => {
+                        // fail to connect the upstream server
+                        log::info!("Active_health_checks: Failed to connect to upstream {}", upstream);
+                        continue;
+                    },
+                }
+            }
+            // Need to unlock!!!
+            drop(active_upstream);
+            thread::sleep(Duration::from_secs(state.active_health_check_interval as u64));
+        }
+    });
+
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
             // Handle the connection!
@@ -89,59 +138,18 @@ fn main() {
     }
 }
 
-/***
- * TODO: Just store the unactive upstream and test => better performace
- */
-fn check_active_upstream(state: ProxyState) {
-    let mut active_upstream = state.active_addresses.lock().unwrap();
-    // clear the active server
-    active_upstream.clear();
-    for upstream in &state.upstream_addresses {
-        // connect upstream server
-        match TcpStream::connect(upstream) {
-            Ok(mut tcp_stream) => {
-                log::info!("Active_health_checks: Successfully connect to upstream {}", upstream);
-                let path = upstream.clone() + state.active_health_check_path.as_str();
-                let request = http::Request::builder()
-                    .method(http::Method::GET)
-                    .uri(path)
-                    .header("Host", upstream)
-                    .body(vec![])
-                    .unwrap();
-                if let Err(_) = request::write_to_stream(&request, &mut tcp_stream) {
-                    // fail to write the request into tcp_stream
-                    log::info!("Active_health_checks: Failed to write the request into tcp_stream {:?}", tcp_stream);
-                    continue;
-                }
-
-                let response = match response::read_from_stream(&mut tcp_stream, request.method()) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        log::error!("Error reading response from server: {:?}", error);
-                        continue;
-                    }
-                };
-                if response.status().as_u16() == 200 {
-                    active_upstream.push(upstream.clone());
-                }
-            },
-            Err(_) => {
-                // fail to connect the upstream server
-                log::info!("Active_health_checks: Failed to connect to upstream {}", upstream);
-                continue;
-            },
-        }
-    }
-}
 
 fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
     let mut rng = rand::rngs::StdRng::from_entropy();
-    let len = state.upstream_addresses.len();
+    let shared_active_addresses = Arc::clone(&state.active_addresses);
+    let active_addresses = shared_active_addresses.lock().unwrap();
+    // let active_addresses = &state.upstream_addresses;
+    let len = active_addresses.len();
     let mut upstream_idx = rng.gen_range(0..len);
     let record_idx = upstream_idx;
     let mut error = None;
     loop {
-        let upstream_ip = &state.upstream_addresses[upstream_idx];
+        let upstream_ip = &active_addresses[upstream_idx];
         match TcpStream::connect(upstream_ip) {
             Ok(tcp_stream) => {
                 log::info!("Successfully connect to upstream {}", upstream_ip);
