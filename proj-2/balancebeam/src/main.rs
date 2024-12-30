@@ -3,7 +3,8 @@ mod response;
 
 use clap::Parser;
 use rand::{Rng, SeedableRng};
-use std::{net::{TcpListener, TcpStream}, sync::{Arc, Mutex}, thread, time::Duration};
+use core::time;
+use std::{collections::HashMap, net::{TcpListener, TcpStream}, sync::{Arc, Mutex}, thread, time::Duration};
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -38,8 +39,9 @@ struct ProxyState {
     /// Where we should send requests when doing active health checks (Milestone 4)
     active_health_check_path: String,
     /// Maximum number of requests an individual IP can make in a minute (Milestone 5)
-    #[allow(dead_code)]
     max_requests_per_minute: usize,
+    // Record how many times the client request
+    rate_limiting_table: Arc<Mutex<HashMap<String, usize>>>,
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
     /// Addresses of active servers taht we are proxying to
@@ -79,11 +81,19 @@ fn main() {
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
+        rate_limiting_table: Arc::new(Mutex::new(HashMap::new())),
     };
-
-    let state_copy = state.clone();
+    
+    // For active health check
+    let state_copy_0 = state.clone();
     thread::spawn(move || {
-        active_health_check(&state_copy)
+        active_health_check(&state_copy_0)
+    });
+
+    // For Rate limiting
+    let state_copy_1 = state.clone();
+    thread::spawn(move || {
+        times_clear(&state_copy_1);
     });
 
     for stream in listener.incoming() {
@@ -91,6 +101,15 @@ fn main() {
             // Handle the connection!
             handle_connection(stream, &state);
         }
+    }
+}
+
+fn times_clear(state: &ProxyState) {
+    loop {
+        thread::sleep(Duration::from_secs(60));
+        let mut table = state.rate_limiting_table.lock().unwrap();
+        table.values_mut().for_each(|value| *value = 0);
+        drop(table);
     }
 }
 
@@ -203,7 +222,33 @@ fn handle_connection(mut client_conn: TcpStream, state: &ProxyState) {
     loop {
         // Read a request from the client
         let mut request = match request::read_from_stream(&mut client_conn) {
-            Ok(request) => request,
+            Ok(request) => {
+                if state.max_requests_per_minute == 0 {
+                    request
+                } else {
+                    let mut table = state.rate_limiting_table.lock().unwrap();
+                    if table.contains_key(&client_ip) {
+                        // the client ip request
+                        let times = table.get(&client_ip).unwrap();
+                        if times >= &state.max_requests_per_minute {
+                            let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
+                            send_response(&mut client_conn, &response);
+                            drop(table);
+                            continue;
+                        } else {
+                            let rates = table.get_mut(&client_ip).unwrap();
+                            *rates += 1;
+                            drop(table);
+                            request
+                        }
+                    } else {
+                        // the client ip never request 
+                        table.insert(client_ip.clone(), 1);
+                        drop(table);
+                        request
+                    }
+                }
+            },
             // Handle case where client closed connection and is no longer sending requests
             Err(request::Error::IncompleteRequest(0)) => {
                 log::debug!("Client finished sending requests. Shutting down connection");
