@@ -3,7 +3,7 @@ mod response;
 
 use clap::Parser;
 use rand::{Rng, SeedableRng};
-use std::net::{TcpListener, TcpStream};
+use std::{net::{TcpListener, TcpStream}, sync::Mutex, thread, time::Duration};
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -43,6 +43,8 @@ struct ProxyState {
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
+    /// Addresses of active servers taht we are proxying to
+    active_addresses: Mutex<Vec<String>>,
 }
 
 fn main() {
@@ -74,6 +76,7 @@ fn main() {
     // Handle incoming connections
     let state = ProxyState {
         upstream_addresses: options.upstream,
+        active_addresses: Mutex::new(Vec::new()),
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
@@ -82,6 +85,51 @@ fn main() {
         if let Ok(stream) = stream {
             // Handle the connection!
             handle_connection(stream, &state);
+        }
+    }
+}
+
+/***
+ * TODO: Just store the unactive upstream and test => better performace
+ */
+fn check_active_upstream(state: ProxyState) {
+    let mut active_upstream = state.active_addresses.lock().unwrap();
+    // clear the active server
+    active_upstream.clear();
+    for upstream in &state.upstream_addresses {
+        // connect upstream server
+        match TcpStream::connect(upstream) {
+            Ok(mut tcp_stream) => {
+                log::info!("Active_health_checks: Successfully connect to upstream {}", upstream);
+                let path = upstream.clone() + state.active_health_check_path.as_str();
+                let request = http::Request::builder()
+                    .method(http::Method::GET)
+                    .uri(path)
+                    .header("Host", upstream)
+                    .body(vec![])
+                    .unwrap();
+                if let Err(_) = request::write_to_stream(&request, &mut tcp_stream) {
+                    // fail to write the request into tcp_stream
+                    log::info!("Active_health_checks: Failed to write the request into tcp_stream {:?}", tcp_stream);
+                    continue;
+                }
+
+                let response = match response::read_from_stream(&mut tcp_stream, request.method()) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        log::error!("Error reading response from server: {:?}", error);
+                        continue;
+                    }
+                };
+                if response.status().as_u16() == 200 {
+                    active_upstream.push(upstream.clone());
+                }
+            },
+            Err(_) => {
+                // fail to connect the upstream server
+                log::info!("Active_health_checks: Failed to connect to upstream {}", upstream);
+                continue;
+            },
         }
     }
 }
