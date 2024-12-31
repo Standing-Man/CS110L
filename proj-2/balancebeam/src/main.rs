@@ -2,9 +2,10 @@ mod request;
 mod response;
 
 use clap::Parser;
+use threadpool::ThreadPool;
+use std::sync::RwLock;
 use rand::{Rng, SeedableRng};
-use core::time;
-use std::{collections::HashMap, net::{TcpListener, TcpStream}, sync::{Arc, Mutex}, thread, time::Duration};
+use std::{collections::HashMap, net::{TcpListener, TcpStream}, sync::Arc, thread, time::Duration};
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -41,11 +42,11 @@ struct ProxyState {
     /// Maximum number of requests an individual IP can make in a minute (Milestone 5)
     max_requests_per_minute: usize,
     // Record how many times the client request
-    rate_limiting_table: Arc<Mutex<HashMap<String, usize>>>,
+    rate_limiting_table: Arc<RwLock<HashMap<String, usize>>>,
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
     /// Addresses of active servers taht we are proxying to
-    active_addresses: Arc<Mutex<Vec<String>>>,
+    active_addresses: Arc<RwLock<Vec<String>>>,
 }
 
 fn main() {
@@ -76,12 +77,12 @@ fn main() {
 
     // Handle incoming connections
     let state = ProxyState {
-        active_addresses: Arc::new(Mutex::new(options.upstream.clone())),
+        active_addresses: Arc::new(RwLock::new(options.upstream.clone())),
         upstream_addresses: options.upstream,
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
-        rate_limiting_table: Arc::new(Mutex::new(HashMap::new())),
+        rate_limiting_table: Arc::new(RwLock::new(HashMap::new())),
     };
     
     // For active health check
@@ -96,10 +97,15 @@ fn main() {
         times_clear(&state_copy_1);
     });
 
+    let pool = ThreadPool::new(10);
+
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
             // Handle the connection!
-            handle_connection(stream, &state);
+            let state_copy = state.clone();
+            pool.execute(move || {
+                handle_connection(stream, &state_copy);
+            });
         }
     }
 }
@@ -107,7 +113,7 @@ fn main() {
 fn times_clear(state: &ProxyState) {
     loop {
         thread::sleep(Duration::from_secs(60));
-        let mut table = state.rate_limiting_table.lock().unwrap();
+        let mut table = state.rate_limiting_table.write().unwrap();
         table.values_mut().for_each(|value| *value = 0);
         drop(table);
     }
@@ -117,7 +123,7 @@ fn active_health_check(state: &ProxyState) {
     loop {
         thread::sleep(Duration::from_secs(state.active_health_check_interval as u64));
         log::info!("Active health check interval begin");
-        let mut active_upstream = state.active_addresses.lock().unwrap();
+        let mut active_upstream = state.active_addresses.write().unwrap();
         // clear the active server
         active_upstream.clear();
         for upstream in &state.upstream_addresses {
@@ -164,7 +170,7 @@ fn active_health_check(state: &ProxyState) {
 fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
     let mut rng = rand::rngs::StdRng::from_entropy();
     let shared_active_addresses = Arc::clone(&state.active_addresses);
-    let active_addresses = shared_active_addresses.lock().unwrap();
+    let active_addresses = shared_active_addresses.read().unwrap();
     // let active_addresses = &state.upstream_addresses;
     let len = active_addresses.len();
     let mut upstream_idx = rng.gen_range(0..len);
@@ -226,7 +232,7 @@ fn handle_connection(mut client_conn: TcpStream, state: &ProxyState) {
                 if state.max_requests_per_minute == 0 {
                     request
                 } else {
-                    let mut table = state.rate_limiting_table.lock().unwrap();
+                    let mut table = state.rate_limiting_table.write().unwrap();
                     let entry = table.entry(client_ip.clone()).or_insert(0);
                 
                     if *entry >= state.max_requests_per_minute {
